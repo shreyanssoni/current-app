@@ -1,7 +1,8 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
-import { callAI, analyzeInsight, getEmbedding, decomposeGoal, generateMission, generateSchedule } from './services/aiService';
+import multer from 'multer';
+import { callAI, analyzeInsight, getEmbedding, decomposeGoal, generateMission, generateSchedule, processMindspace, analyzeMindspacePatterns } from './services/aiService';
 import { TEST_USER_ID } from './config';
 
 dotenv.config();
@@ -17,6 +18,9 @@ const supabaseKey = process.env.SUPABASE_KEY || '';
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 app.use(express.json());
+
+// Set up Multer for image uploads
+const upload = multer({ storage: multer.memoryStorage() });
 
 app.get('/', (req, res) => {
     res.send('Current Core Node Service Running');
@@ -654,7 +658,7 @@ app.patch('/api/stream/toggle', async (req, res) => {
 
 // Quick Add directly to Dock
 app.post('/api/stream/add', async (req, res) => {
-    const { content, type = 'task', userId = TEST_USER_ID, in_stream = false } = req.body;
+    const { content, type = 'task', userId = TEST_USER_ID, in_stream = false, duration } = req.body;
 
     if (!content) {
         return res.status(400).json({ error: 'Content is required' });
@@ -681,7 +685,10 @@ app.post('/api/stream/add', async (req, res) => {
                     start_at: start_at,
                     end_at: end_at,
                     locked: !!in_stream,
-                    json_attributes: { in_stream: !!in_stream },
+                    json_attributes: {
+                        in_stream: !!in_stream,
+                        ...(duration ? { duration } : {})
+                    },
                     created_at: new Date().toISOString(),
                     updated_at: new Date().toISOString()
                 }
@@ -726,6 +733,24 @@ app.patch('/api/insights/:id/reschedule', async (req, res) => {
         res.json({ success: true, start_at: finalStart, end_at: finalEnd });
     } catch (error: any) {
         console.error('Reschedule error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Delete Task from Stream/Dock
+app.delete('/api/stream/:id', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { error } = await supabase
+            .from('insights')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true, id });
+    } catch (error: any) {
+        console.error('Delete error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -1044,6 +1069,251 @@ app.post('/api/insights/decompose', async (req, res) => {
 
     } catch (error: any) {
         console.error('Decomposition error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- MINDSPACE MODULE ---
+
+// 1. Add Entry (Processing Pipeline)
+app.post('/api/mindspace/add', upload.single('image'), async (req, res) => {
+    const { text, userId = TEST_USER_ID, mediaType = 'text' } = req.body;
+    let imageUrl = req.body.imageUrl; // Fallback for direct URL
+
+    try {
+        // A. Handle Image Upload if provided
+        if (req.file) {
+            console.log(`[MINDSPACE] Uploading image: ${req.file.originalname}...`);
+            const fileExt = req.file.originalname.split('.').pop();
+            const fileName = `${userId}_${Date.now()}.${fileExt}`;
+            const filePath = `entries/${fileName}`;
+
+            const { data: uploadData, error: uploadError } = await supabase.storage
+                .from('mindspace_assets')
+                .upload(filePath, req.file.buffer, {
+                    contentType: req.file.mimetype,
+                    upsert: true
+                });
+
+            if (uploadError) {
+                console.error('[STORAGE] Upload failed:', uploadError);
+                throw uploadError;
+            }
+
+            const { data: { publicUrl } } = supabase.storage
+                .from('mindspace_assets')
+                .getPublicUrl(filePath);
+
+            imageUrl = publicUrl;
+        }
+
+        // B. Fetch Existing Clusters (Context for Librarian)
+        const { data: existingClusters } = await supabase
+            .from('mindspace_clusters')
+            .select('id, name, center_embedding')
+            .eq('user_id', userId)
+            .limit(100);
+
+        // C. Process via AI (Vision, Embedding, Clustering, Tone)
+        console.log(`[MINDSPACE] Processing entry for user ${userId} with ${existingClusters?.length || 0} existing clusters...`);
+        const aiResults = await processMindspace(text || "", imageUrl, userId, existingClusters || []);
+
+        // C. Storage: Save Entry
+        const { data: entry, error: entryError } = await supabase
+            .from('mindspace_entries')
+            .insert({
+                user_id: userId,
+                content_text: text,
+                media_url: imageUrl,
+                media_type: imageUrl ? 'image' : 'text',
+                ai_description: aiResults.ai_description,
+                embedding: aiResults.embedding,
+                emotional_tone: aiResults.tone,
+                created_at: new Date().toISOString()
+            })
+            .select()
+            .single();
+
+        if (entryError) throw entryError;
+
+        // D. Link Entry <-> Clusters (Python already assigned/created them)
+        if (aiResults.cluster_ids && aiResults.cluster_ids.length > 0) {
+            console.log(`[MINDSPACE] Linking entry ${entry.id} to clusters:`, aiResults.cluster_ids);
+            const linkData = aiResults.cluster_ids.map((cid: string | number) => ({
+                entry_id: entry.id,
+                cluster_id: cid
+            }));
+            const { error: linkError } = await supabase
+                .from('entry_clusters')
+                .insert(linkData);
+            if (linkError) console.error('[MINDSPACE] Cluster linking error:', linkError);
+        }
+
+        res.json({ success: true, entry });
+    } catch (error: any) {
+        console.error('[MINDSPACE] Add error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 2. Feed Endpoint (Chronological + Resurfaced + Search)
+app.get('/api/mindspace/feed', async (req, res) => {
+    const { userId = TEST_USER_ID, q } = req.query;
+
+    try {
+        let queryBuilder = supabase
+            .from('mindspace_entries')
+            .select('*')
+            .eq('user_id', userId);
+
+        let entries;
+
+        if (q) {
+            console.log(`[MINDSPACE] Searching for: ${q}...`);
+            const embedding = await getEmbedding(q as string);
+
+            if (embedding) {
+                // Use Supabase RPC for vector similarity search
+                const { data: searchResults, error: searchError } = await supabase.rpc('match_mindspace_entries', {
+                    query_embedding: embedding,
+                    match_threshold: 0.5,
+                    match_count: 50,
+                    p_user_id: userId
+                });
+
+                if (searchError) throw searchError;
+                entries = searchResults;
+            } else {
+                // Fallback to text search if embedding service is down or failed
+                console.warn('[MINDSPACE] Embedding failed, falling back to text search.');
+                const { data: textResults, error: textError } = await queryBuilder
+                    .or(`content_text.ilike.%${q}%,ai_description.ilike.%${q}%`)
+                    .order('created_at', { ascending: false })
+                    .limit(50);
+
+                if (textError) throw textError;
+                entries = textResults;
+            }
+        } else {
+            // Standard feed: Fetch last 50 entries
+            const { data: standardResults, error } = await queryBuilder
+                .order('created_at', { ascending: false })
+                .limit(50);
+
+            if (error) throw error;
+            entries = standardResults;
+        }
+
+        // Fetch a "Resurfaced" memory (older than 30 days)
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const { data: resurfaced } = await supabase
+            .from('mindspace_entries')
+            .select('*')
+            .eq('user_id', userId) // Ensure resurfaced memory is for the current user
+            .lt('created_at', thirtyDaysAgo.toISOString())
+            .limit(5); // Get a few to pick one
+
+        let feed: any[] = [...(entries || [])];
+
+        if (resurfaced && resurfaced.length > 0) {
+            const memory = resurfaced[Math.floor(Math.random() * resurfaced.length)];
+            // Inject at 10th position if possible
+            if (feed.length >= 10) {
+                feed.splice(9, 0, { ...memory, is_resurfaced: true });
+            } else if (feed.length > 0) {
+                feed.push({ ...memory, is_resurfaced: true });
+            }
+        }
+
+        res.json({ feed });
+    } catch (error: any) {
+        console.error('[MINDSPACE] Feed error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3. Patterns/Intelligence Endpoint
+app.get('/api/mindspace/patterns', async (req, res) => {
+    const { userId = TEST_USER_ID } = req.query;
+    try {
+        // Fetch last 20 entries for analysis for SPECIFIC user
+        const { data: entries, error } = await supabase
+            .from('mindspace_entries')
+            .select('content_text, ai_description, emotional_tone, created_at')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: false })
+            .limit(20);
+
+        if (error || !entries) throw error || new Error('No entries');
+
+        /* 
+        // Cache check removed as per user request for fresh generation on every click
+        const { data: cached } = await supabase
+            .from('mindspace_insights')
+            .select('*')
+            .eq('user_id', userId)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
+
+        const oneHourAgo = new Date(Date.now() - 3600000);
+        if (cached && new Date(cached.created_at) > oneHourAgo) {
+            return res.json({ insight: cached.insight_text });
+        }
+        */
+
+        // Always generate new pattern analysis
+        console.log(`[MINDSPACE] Generating fresh patterns for user ${userId}...`);
+        const insightText = await analyzeMindspacePatterns(entries);
+
+        // Cache it for the user
+        await supabase
+            .from('mindspace_insights')
+            .insert({
+                user_id: userId,
+                insight_text: insightText,
+                created_at: new Date().toISOString()
+            });
+
+        res.json({ insight: insightText });
+    } catch (error: any) {
+        console.error('[MINDSPACE] Patterns error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 4. Clusters Endpoint
+app.get('/api/mindspace/clusters', async (req, res) => {
+    const { userId = TEST_USER_ID } = req.query;
+    try {
+        const { data: clusters, error } = await supabase
+            .from('mindspace_clusters')
+            .select('*')
+            .eq('user_id', userId)
+            .order('name', { ascending: true });
+
+        if (error) throw error;
+        res.json({ clusters });
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 5. Cluster Filtered View
+app.get('/api/mindspace/clusters/:clusterId/entries', async (req, res) => {
+    const { clusterId } = req.params;
+    try {
+        const { data, error } = await supabase
+            .from('entry_clusters')
+            .select('mindspace_entries(*)')
+            .eq('cluster_id', clusterId);
+
+        if (error) throw error;
+        const entries = data.map(d => d.mindspace_entries).filter(e => e !== null);
+        res.json({ entries });
+    } catch (error: any) {
         res.status(500).json({ error: error.message });
     }
 });

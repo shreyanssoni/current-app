@@ -103,6 +103,36 @@ class LLMService:
                 "3. Steps should be immediately executable (no vague concepts).\n"
                 "4. RETURN ONLY a JSON object with a 'tasks' field containing an array of strings.\n"
                 "Structure: {{ \"tasks\": [\"Action 1\", \"Action 2\", \"Action 3\"] }}"
+            ),
+            "mindspace_vision": (
+                "Describe this image in detail. Identify the mood, objects, aesthetic, and any visible text. "
+                "Be concise but descriptive. Provide a poetic but accurate description for a subconscious thought journal. "
+                "Max 3 sentences. Return ONLY the description text."
+            ),
+            "mindspace_clustering": (
+                "You are a strict Librarian. Your job is to categorize concepts based on a provided list of existing sections. "
+                "Rules:\n"
+                "1. heavily PREFER assigning to an 'existing_sections' from the list provided if the concept fits.\n"
+                "2. Only suggest a NEW section if the input is completely unrelated to everything in the list.\n"
+                "3. Use broad categories (e.g., 'Nature' instead of 'Ocean', 'Self-Development' instead of 'Morning Routine').\n"
+                "4. Return ONLY a JSON object with a 'clusters' array of strings.\n"
+                "Structure: {{ \"clusters\": [\"Theme1\", \"Theme2\"] }}"
+            ),
+            "mindspace_sentiment": (
+                "Analyze the emotional tone of the input. Return a single-word emotional tone. "
+                "Example: 'Nostalgic', 'Anxious', 'Determined', 'Calm'. "
+                "Return ONLY a JSON object with 'tone'. "
+                "Structure: {{ \"tone\": \"...\" }}"
+            ),
+            "mindspace_patterns": (
+                "You are an expert psychological profiler and life coach. "
+                "Analyze the provided thoughts and image descriptions to identify deep patterns.\n\n"
+                "Return in response: Output a clear, structured insight report with these specific sections:\n"
+                "1. **THOUGHT PATTERNS**: Recurring mental themes or cognitive habits.\n"
+                "2. **INTERESTS**: What is currently exciting or capturing your attention.\n"
+                "3. **DISLIKES**: Sources of friction, stress, or negativity identified.\n"
+                "4. **AI SUGGESTED ACTIONS**: 2 practical, high-impact things you can do next based on this mindset.\n\n"
+                "Format: Professional, insightful, and concise. Respond in one line only for each section. Return in beautiful markdown.. "
             )
         }
 
@@ -124,6 +154,27 @@ class LLMService:
             raise ValueError(f"Provider {provider} not supported")
 
         from langchain_core.prompts import ChatPromptTemplate
+        
+        # Support for Vision
+        if prompt_type == "mindspace_vision" and provider == "groq":
+            vision_model = "llama-3.2-11b-vision-preview"
+            chat = ChatGroq(temperature=0, model_name=vision_model, groq_api_key=self.groq_key)
+            
+            # For vision, prompt is actually the image URL or base64
+            # Assuming 'prompt' is the image URL here
+            message = HumanMessage(
+                content=[
+                    {"type": "text", "text": system_msg},
+                    {"type": "image_url", "image_url": {"url": prompt}},
+                ]
+            )
+            try:
+                res = await chat.ainvoke([message])
+                return res.content
+            except Exception as e:
+                logger.error(f"Vision failed: {str(e)}")
+                return "An image that words couldn't capture."
+
         chat_prompt = ChatPromptTemplate.from_messages([
             ("system", system_msg),
             ("human", "{input}")
@@ -142,16 +193,34 @@ class LLMService:
             content = content.strip()
 
             import json
+            # Prompt types that MUST return JSON
+            JSON_REQUIRED_TYPES = {
+                "negotiate_resistance", "auto_tag_capture", "resurface_insight", 
+                "decompose_goal", "select_mission", "generate_schedule", 
+                "spark_idea", "mindspace_clustering", "mindspace_sentiment"
+            }
+
             try:
                 parsed = json.loads(content)
-                logger.info("Generation and parsing successful")
+                logger.info("Generation and parsing successful (Strict JSON)")
                 return parsed
             except json.JSONDecodeError:
-                logger.warning("Strict parsing failed, searching for JSON block...")
+                # Try to find a JSON block with regex
                 match = re.search(r'\{.*\}', content, re.DOTALL)
                 if match:
-                    return json.loads(match.group())
-                raise ValueError("Could not find valid JSON in response")
+                    try:
+                        parsed = json.loads(match.group())
+                        logger.info("Generation and parsing successful (Regex JSON)")
+                        return parsed
+                    except json.JSONDecodeError:
+                        pass
+                
+                # If JSON is not strictly required, return the raw text
+                if prompt_type not in JSON_REQUIRED_TYPES:
+                    logger.info(f"JSON parsing failed but not required for {prompt_type}. Returning raw content.")
+                    return content
+                
+                raise ValueError(f"Could not find valid JSON in response for required type: {prompt_type}")
 
         except Exception as e:
             logger.error(f"Generation failed: {str(e)}")

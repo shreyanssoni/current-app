@@ -128,3 +128,41 @@ export async function generateSchedule(tasks: any[], startTime: string, curDate:
         throw error;
     }
 }
+/**
+ * Orchestrates Vision, Embedding, Clustering, and Sentiment for a Mindspace entry.
+ */
+export async function processMindspace(text: string, imageUrl?: string, userId?: string, existingClusters: any[] = []): Promise<any> {
+    try {
+        const response = await axios.post(`${AI_SERVICE_URL}/mindspace/process`, {
+            text,
+            image_url: imageUrl,
+            userId,
+            existing_clusters: existingClusters
+        });
+        if (response.data.status === 'success') {
+            return response.data.response;
+        }
+        throw new Error('Mindspace processing failed');
+    } catch (error: any) {
+        console.error('Error in processMindspace:', error.message);
+        throw error;
+    }
+}
+
+/**
+ * Analyzes recent entries for recurring themes and patterns.
+ */
+export async function analyzeMindspacePatterns(entries: any[]): Promise<string> {
+    try {
+        const response = await axios.post(`${AI_SERVICE_URL}/mindspace/analyze_patterns`, {
+            entries
+        });
+        if (response.data.status === 'success') {
+            return response.data.response || "Continue capturing your thoughts to surface patterns.";
+        }
+        return "Insight calculation in progress...";
+    } catch (error: any) {
+        console.error('Error in analyzeMindspacePatterns:', error.message);
+        return "Mindspace is reflecting on your thoughts...";
+    }
+}
