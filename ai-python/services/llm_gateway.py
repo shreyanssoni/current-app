@@ -105,9 +105,9 @@ class LLMService:
                 "Structure: {{ \"tasks\": [\"Action 1\", \"Action 2\", \"Action 3\"] }}"
             ),
             "mindspace_vision": (
-                "Describe this image in detail. Identify the mood, objects, aesthetic, and any visible text. "
+                "Describe this image in short. Identify the mood, objects, aesthetic, and any visible text. "
                 "Be concise but descriptive. Provide a poetic but accurate description for a subconscious thought journal. "
-                "Max 3 sentences. Return ONLY the description text."
+                "Max 2 sentences. Return ONLY the description text. Be concise and answer in short."
             ),
             "mindspace_clustering": (
                 "You are a strict Librarian. Your job is to categorize concepts based on a provided list of existing sections. "
@@ -164,7 +164,7 @@ class LLMService:
         
         # Support for Vision
         if prompt_type == "mindspace_vision" and provider == "groq":
-            vision_model = "llama-3.2-11b-vision-preview"
+            vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"
             chat = ChatGroq(temperature=0, model_name=vision_model, groq_api_key=self.groq_key)
             
             # For vision, prompt is actually the image URL or base64
