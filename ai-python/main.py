@@ -200,13 +200,32 @@ async def process_mindspace_entry(request: dict):
                 best_similarity = 0
                 best_existing_id = None
                 
+                def safe_vec(v):
+                    if isinstance(v, str):
+                        try:
+                            import json
+                            v = json.loads(v)
+                        except:
+                            # Handle postgres vector format "[1,2,3]" or "(1,2,3)"
+                            v = v.strip('[]()').split(',')
+                            v = [float(x) for x in v]
+                    return np.array(v).flatten()
+
                 for cluster in existing_clusters:
                     if cluster.get('center_embedding'):
-                        # cosine similarity
-                        sim = 1 - cosine(tag_embedding, cluster['center_embedding'])
-                        if sim > best_similarity:
-                            best_similarity = sim
-                            best_existing_id = cluster['id']
+                        # cosine similarity - ensure vectors are 1D and numeric
+                        try:
+                            v1 = safe_vec(tag_embedding)
+                            v2 = safe_vec(cluster['center_embedding'])
+                            
+                            if v1.shape == v2.shape and v1.size > 0:
+                                sim = 1 - cosine(v1, v2)
+                                if sim > best_similarity:
+                                    best_similarity = sim
+                                    best_existing_id = cluster['id']
+                        except Exception as ve:
+                            print(f"[AI] Vector compare error: {ve}")
+                            continue
                 
                 if best_similarity > 0.85:
                     target_cluster_id = best_existing_id
@@ -248,6 +267,67 @@ async def analyze_patterns(request: dict):
         return {"status": "success", "response": response}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+@app.post("/api/mindspace/chat")
+async def mindspace_chat(request: dict):
+    """
+    RAG-based chat: Vector search in Supabase, then Groq LLM response.
+    """
+    query = request.get("query", "")
+    user_id = request.get("userId") # Not used in SQL currently but good to have
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    try:
+        # 1. Embed query
+        embedding = await llm_service.generate_embedding(query)
+        if not embedding:
+            raise HTTPException(status_code=500, detail="Failed to embed query")
+
+        # 2. Semantic Search in Supabase
+        # threshold: 0.5, limit: 10
+        rpc_params = {
+            'query_embedding': embedding,
+            'match_threshold': 0.3, # A bit lower to be more inclusive
+            'match_count': 10,
+            'p_user_id': user_id
+        }
+        
+        search_results = supabase.rpc('match_mindspace_entries', rpc_params).execute()
+        
+        if not search_results.data:
+            context_text = "No relevant Mindspace entries found."
+        else:
+            # 3. Format Context
+            context_parts = []
+            for item in search_results.data:
+                date_str = item.get('created_at', 'Unknown Date')
+                content = item.get('content_text') or "Image Insight"
+                vision = item.get('ai_description') or ""
+                part = f"[{date_str}] {content}\nVision: {vision}"
+                context_parts.append(part)
+            
+            context_text = "\n\n".join(context_parts)
+
+        # 4. Generate RAG Answer
+        full_prompt = f"CONTEXT:\n{context_text}\n\nUSER QUESTION: {query}"
+        
+        answer = await llm_service.generate(
+            prompt=full_prompt,
+            provider="groq",
+            prompt_type="mindspace_chat"
+        )
+
+        return {
+            "status": "success",
+            "answer": answer,
+            "context_count": len(search_results.data) if search_results.data else 0
+        }
+
+    except Exception as e:
+        print(f"[AI] Chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():

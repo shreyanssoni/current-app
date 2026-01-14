@@ -133,6 +133,13 @@ class LLMService:
                 "3. **DISLIKES**: Sources of friction, stress, or negativity identified.\n"
                 "4. **AI SUGGESTED ACTIONS**: 2 practical, high-impact things you can do next based on this mindset.\n\n"
                 "Format: Professional, insightful, and concise. Respond in one line only for each section. Return in beautiful markdown.. "
+            ),
+            "mindspace_chat": (
+                "You are a Second Brain. You help users understand their own thoughts and experiences. "
+                "Use the provided context (notes and image descriptions) to answer the user's query. "
+                "Be helpful, insightful, and always reference dates if they are in the context. "
+                "If the answer isn't in the context, say you don't recall that specific detail from their Mindspace. "
+                "Maintain a clean, encouraging tone."
             )
         }
 
@@ -267,7 +274,9 @@ class LLMService:
                 model="sentence-transformers/all-MiniLM-L6-v2",
             )   
 
-            return response.tolist() if hasattr(response, 'tolist') else response
+            import numpy as np
+            vector = np.array(response).flatten().tolist()
+            return vector
 
             if response.status_code != 200:
                 logger.error(f"HF Embedding Error: {response.text}")

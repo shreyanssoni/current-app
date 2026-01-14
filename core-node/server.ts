@@ -2,7 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
-import { callAI, analyzeInsight, getEmbedding, decomposeGoal, generateMission, generateSchedule, processMindspace, analyzeMindspacePatterns } from './services/aiService';
+import { callAI, analyzeInsight, getEmbedding, decomposeGoal, generateMission, generateSchedule, processMindspace, analyzeMindspacePatterns, chatMindspace } from './services/aiService';
 import { TEST_USER_ID } from './config';
 
 dotenv.config();
@@ -755,6 +755,24 @@ app.delete('/api/stream/:id', async (req, res) => {
     }
 });
 
+// Delete Mindspace Entry
+app.delete('/api/mindspace/:id', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const { error } = await supabase
+            .from('mindspace_entries')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true, id });
+    } catch (error: any) {
+        console.error('Mindspace delete error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Move Task between zones
 app.patch('/api/queue/move', async (req, res) => {
     const { id, targetZone } = req.body;
@@ -1314,6 +1332,18 @@ app.get('/api/mindspace/clusters/:clusterId/entries', async (req, res) => {
         const entries = data.map(d => d.mindspace_entries).filter(e => e !== null);
         res.json({ entries });
     } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 5. Chat Endpoint (RAG)
+app.post('/api/mindspace/chat', async (req, res) => {
+    const { query, userId = TEST_USER_ID } = req.body;
+    try {
+        const result = await chatMindspace(query, userId);
+        res.json(result);
+    } catch (error: any) {
+        console.error('[MINDSPACE] Chat error:', error);
         res.status(500).json({ error: error.message });
     }
 });

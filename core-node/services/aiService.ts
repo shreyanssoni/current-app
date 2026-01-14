@@ -166,3 +166,21 @@ export async function analyzeMindspacePatterns(entries: any[]): Promise<string> 
         return "Mindspace is reflecting on your thoughts...";
     }
 }
+/**
+ * RAG-based chat over mindspace memories.
+ */
+export async function chatMindspace(query: string, userId: string): Promise<any> {
+    try {
+        const response = await axios.post(`${AI_SERVICE_URL}/api/mindspace/chat`, {
+            query,
+            userId
+        });
+        if (response.data.status === 'success') {
+            return response.data;
+        }
+        throw new Error('Chat failed');
+    } catch (error: any) {
+        console.error('Error in chatMindspace:', error.message);
+        throw error;
+    }
+}
