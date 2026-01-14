@@ -2,27 +2,30 @@ import os
 import logging
 from typing import Optional
 from dotenv import load_dotenv
+import requests
 from langchain_groq import ChatGroq
-from langchain_community.chat_models import ChatOllama
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage
-from sentence_transformers import SentenceTransformer
+from huggingface_hub import InferenceClient
 
 load_dotenv()
+
+client = InferenceClient(token=os.environ.get("HUGGINGFACE_API_KEY"))
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LLMService")
 
-logger.info("Loading local embedding model: all-MiniLM-L6-v2")
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-
 class LLMService:
     def __init__(self):
         self.groq_key = os.getenv("GROQ_API_KEY")
-        self.openai_key = os.getenv("OPENAI_API_KEY")
         self.ollama_url = os.getenv("OLLAMA_BASE_URL")
         self.default_model = os.getenv("DEFAULT_CHAT_MODEL")
+        
+        # HuggingFace Config
+        self.hf_token = os.environ.get("HUGGINGFACE_API_KEY")
+        self.hf_api_url = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
+        
+        # Initialize OpenAI Client (for other tasks)
         logger.info("LLMService initialized")
 
     async def generate(self, prompt: str, provider: str = "groq", model: Optional[str] = None, prompt_type: Optional[str] = None):
@@ -117,12 +120,6 @@ class LLMService:
         if provider == "groq":
             if not self.groq_key: raise ValueError("GROQ_API_KEY not set")
             llm = ChatGroq(temperature=0, model_name=model or self.default_model, groq_api_key=self.groq_key)
-        elif provider == "openai":
-            if not self.openai_key: raise ValueError("OPENAI_API_KEY not set")
-            llm = ChatOpenAI(temperature=0, api_key=self.openai_key, model=model or "gpt-4-turbo")
-        elif provider == "ollama":
-            llm = ChatOllama(base_url=self.ollama_url, model=model or "llama3", temperature=0)
-
         if not llm:
             raise ValueError(f"Provider {provider} not supported")
 
@@ -171,14 +168,44 @@ class LLMService:
 
     async def generate_embedding(self, text: str):
         """
-        Generate vector embedding using local sentence-transformers model
+        Generate vector embedding using HuggingFace API (all-MiniLM-L6-v2)
         """
+        if not self.hf_token:
+            logger.error("HUGGINGFACE_API_KEY not set")
+            return None
+
+        headers = {"Authorization": f"Bearer {self.hf_token}"}
+        
         try:
-            # Local generation is synchronous, so we run it in a thread if needed,
-            # but for MiniLM it's usually fast enough to call directly.
-            # Using .tolist() as requested by user.
-            vector = embedding_model.encode(text).tolist()
-            return vector
+            # Running synchronous requests in async flow (can be improved with aiohttp but sticking to requests as per user snippet)
+            # For production, consider run_in_executor
+            import asyncio
+            from functools import partial
+            
+            loop = asyncio.get_event_loop()
+            # response = await loop.run_in_executor(
+            #     None, 
+            #     partial(
+            #         requests.post, 
+            #         self.hf_api_url, 
+            #         headers=headers, 
+            #         json={"inputs": {"source_sentence": text, "sentences" : [text]}, "options":{"wait_for_model":True}}
+            #     )
+            # )
+
+            response = client.feature_extraction(
+                text,
+                model="sentence-transformers/all-MiniLM-L6-v2",
+            )   
+
+            return response.tolist() if hasattr(response, 'tolist') else response
+
+            if response.status_code != 200:
+                logger.error(f"HF Embedding Error: {response.text}")
+                return None
+                
+            return response.tolist()
+
         except Exception as e:
-            logger.error(f"Local embedding generation failed: {str(e)}")
+            logger.error(f"HF embedding generation failed: {str(e)}")
             return None
