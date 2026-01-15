@@ -1057,7 +1057,7 @@ app.post('/api/insights/decompose', async (req, res) => {
         await supabase
             .from('insights')
             .update({
-                status: 'archived',
+                status: 'ARCHIVED',
                 type: 'project',
                 updated_at: new Date().toISOString()
             })
@@ -1068,7 +1068,7 @@ app.post('/api/insights/decompose', async (req, res) => {
             user_id: userId,
             content: taskContent,
             type: 'task',
-            status: 'active',
+            status: 'ACTIVE',
             json_attributes: { in_stream: false, parent_id: id },
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
