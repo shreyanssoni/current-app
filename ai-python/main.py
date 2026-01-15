@@ -333,6 +333,12 @@ async def mindspace_chat(request: dict):
 async def health_check():
     return {"status": "healthy"}
 
+@app.get("/alive")
+async def alive():
+    return { 
+        "alive": True
+    }
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
