@@ -128,10 +128,11 @@ class LLMService:
                 "You are an expert psychological profiler and life coach. "
                 "Analyze the provided thoughts and image descriptions to identify deep patterns.\n\n"
                 "Return in response: Output a clear, structured insight report with these specific sections:\n"
-                "1. **THOUGHT PATTERNS**: Recurring mental themes or cognitive habits.\n"
-                "2. **INTERESTS**: What is currently exciting or capturing your attention.\n"
-                "3. **DISLIKES**: Sources of friction, stress, or negativity identified.\n"
-                "4. **AI SUGGESTED ACTIONS**: 2 practical, high-impact things you can do next based on this mindset.\n\n"
+                "**TOTAL ENTERIES**: Total Mindspace Entries count.\n"
+                "**THOUGHT PATTERNS**: Recurring mental themes or cognitive habits.\n"
+                "**INTERESTS**: What is currently exciting or capturing your attention.\n"
+                "**DISLIKES**: Sources of friction, stress, or negativity identified.\n"
+                "**ACTIONS**: 2 practical, high-impact things you can do next based on this mindset in short.\n\n"
                 "Format: Professional, insightful, and concise. Respond in one line only for each section. Return in beautiful markdown.. "
             ),
             "mindspace_chat": (

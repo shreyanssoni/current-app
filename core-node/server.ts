@@ -873,7 +873,7 @@ app.post('/api/mission/generate', async (req, res) => {
             .from('insights')
             .select('id, content, json_attributes')
             .eq('user_id', userId)
-            .eq('status', 'active');
+            .eq('status', 'ACTIVE');
 
         if (error) throw error;
         const dockOnly = (dockTasks as any[])?.filter(t => !t.json_attributes?.in_stream) || [];
@@ -1344,6 +1344,115 @@ app.post('/api/mindspace/chat', async (req, res) => {
         res.json(result);
     } catch (error: any) {
         console.error('[MINDSPACE] Chat error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Update Stream Task
+app.patch('/api/stream/:id', async (req, res) => {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // Filter allowed fields
+    const allowed = ['start_at', 'end_at', 'content', 'status', 'json_attributes'];
+    const filteredUpdate: any = {};
+    for (const key of allowed) {
+        if (updates[key] !== undefined) filteredUpdate[key] = updates[key];
+    }
+    filteredUpdate.updated_at = new Date().toISOString();
+
+    try {
+        const { data, error } = await supabase
+            .from('insights')
+            .update(filteredUpdate)
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json(data);
+    } catch (error: any) {
+        console.error('Task update error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Smart Reschedule Single Task
+app.post('/api/stream/reschedule-smart', async (req, res) => {
+    const { id, userId = TEST_USER_ID, duration = 30 } = req.body;
+
+    try {
+        // 1. Fetch all active tasks for today to map out the schedule
+        const startOfDay = new Date();
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date();
+        endOfDay.setHours(23, 59, 59, 999);
+
+        const { data: schedule } = await supabase
+            .from('insights')
+            .select('id, start_at, end_at')
+            .eq('user_id', userId)
+            .eq('status', 'ACTIVE')
+            .gte('start_at', startOfDay.toISOString())
+            .lte('end_at', endOfDay.toISOString())
+            .order('start_at', { ascending: true });
+
+        // 2. Find first gap after NOW
+        const now = new Date();
+        // Round up to next 15 min slot
+        const remainder = 15 - (now.getMinutes() % 15);
+        let checkTime = new Date(now.getTime() + remainder * 60000); // Start checking from next 15m block
+
+        // If 'now' is too late (e.g. 11pm), maybe schedule for tomorrow? For now, stick to today.
+        const workEnd = new Date();
+        workEnd.setHours(23, 0, 0, 0); // Cap at 11 PM
+
+        let foundSlot: { start: Date, end: Date } | null = null;
+
+        // Simple gap search
+        while (checkTime < workEnd) {
+            const proposedEnd = new Date(checkTime.getTime() + duration * 60000);
+
+            // Checking collision
+            const hasCollision = schedule?.some(t => {
+                if (t.id === id) return false; // Ignore self
+                const tStart = new Date(t.start_at);
+                const tEnd = new Date(t.end_at);
+                return (
+                    (checkTime >= tStart && checkTime < tEnd) || // Start inside another
+                    (proposedEnd > tStart && proposedEnd <= tEnd) || // End inside another
+                    (checkTime <= tStart && proposedEnd >= tEnd) // Envelops another
+                );
+            });
+
+            if (!hasCollision) {
+                foundSlot = { start: checkTime, end: proposedEnd };
+                break;
+            }
+
+            // Move by 15 mins
+            checkTime = new Date(checkTime.getTime() + 15 * 60000);
+        }
+
+        if (foundSlot) {
+            // Update the task
+            const { error } = await supabase
+                .from('insights')
+                .update({
+                    start_at: foundSlot.start.toISOString(),
+                    end_at: foundSlot.end.toISOString(),
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', id);
+
+            if (error) throw error;
+            res.json({ success: true, slot: foundSlot });
+        } else {
+            res.status(409).json({ error: 'No available slots found for today.' });
+        }
+
+    } catch (error: any) {
+        console.error('Smart Reschedule error:', error);
         res.status(500).json({ error: error.message });
     }
 });
