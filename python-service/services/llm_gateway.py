@@ -1,34 +1,42 @@
 import os
+import re
+import json
 import logging
+import asyncio
 from typing import Optional
-from dotenv import load_dotenv
-import requests
+from functools import partial
+
+import numpy as np
+from scipy.spatial.distance import cosine
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
 from huggingface_hub import InferenceClient
 
-load_dotenv()
-
-client = InferenceClient(token=os.environ.get("HUGGINGFACE_API_KEY"))
+from config import GROQ_API_KEY, HUGGINGFACE_API_KEY, DEFAULT_CHAT_MODEL
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LLMService")
 
+# Initialize HuggingFace client
+hf_client = InferenceClient(token=HUGGINGFACE_API_KEY) if HUGGINGFACE_API_KEY else None
+
+
 class LLMService:
     def __init__(self):
-        self.groq_key = os.getenv("GROQ_API_KEY")
-        self.ollama_url = os.getenv("OLLAMA_BASE_URL")
-        self.default_model = os.getenv("DEFAULT_CHAT_MODEL")
-        
-        # HuggingFace Config
-        self.hf_token = os.environ.get("HUGGINGFACE_API_KEY")
-        self.hf_api_url = "https://router.huggingface.co/hf-inference/models/sentence-transformers/all-MiniLM-L6-v2"
-        
-        # Initialize OpenAI Client (for other tasks)
+        self.groq_key = GROQ_API_KEY
+        self.default_model = DEFAULT_CHAT_MODEL
+        self.hf_token = HUGGINGFACE_API_KEY
         logger.info("LLMService initialized")
 
-    async def generate(self, prompt: str, provider: str = "groq", model: Optional[str] = None, prompt_type: Optional[str] = None):
+    async def generate(
+        self,
+        prompt: str,
+        provider: str = "groq",
+        model: Optional[str] = None,
+        prompt_type: Optional[str] = None,
+    ):
         """
         Generic generate function that routes to different providers and applies specific prompts
         """
@@ -69,7 +77,7 @@ class LLMService:
                 "1. Each step MUST start with a strong verb.\n"
                 "2. Each step MUST be discrete and achievable today.\n"
                 "3. RETURN ONLY a JSON object with a 'tasks' field containing a list of strings.\n"
-                "Structure: {{ \"tasks\": [\"Step 1\", \"Step 2\"] }}"
+                'Structure: {{ "tasks": ["Step 1", "Step 2"] }}'
             ),
             "select_mission": (
                 "You are a master strategist. Analysis the user's list of tasks (Dock).\n"
@@ -78,8 +86,8 @@ class LLMService:
                 "1. Focus on urgency, importance, and logical flow.\n"
                 "2. RETURN ONLY a JSON object with a 'selected_ids' field containing the list of task IDs.\n"
                 "3. IMPORTANT: Use the EXACT IDs provided in the input. Do not hallucinate or shorten them.\n"
-                "Input format will be: [{{ \"id\": \"...\", \"content\": \"...\" }}, ...]\n"
-                "Structure: {{ \"selected_ids\": [\"uuid1\", \"uuid2\"] }}"
+                'Input format will be: [{{ "id": "...", "content": "..." }}, ...]\n'
+                'Structure: {{ "selected_ids": ["uuid1", "uuid2"] }}'
             ),
             "generate_schedule": (
                 "You are an expert executive assistant. Task: Create a sequential, time-blocked schedule.\n"
@@ -92,7 +100,7 @@ class LLMService:
                 "5. Add 10-minute buffer breaks between tasks if possible.\n"
                 "6. Format: RETURN ONLY a JSON object with a 'schedule' field containing a list of {{id, start_time, end_time}}.\n"
                 "7. Times MUST be in HH:mm format (24h).\n"
-                "Structure: {{ \"schedule\": [{{ \"id\": \"...\", \"start_time\": \"09:00\", \"end_time\": \"09:45\" }}] }}"
+                'Structure: {{ "schedule": [{{ "id": "...", "start_time": "09:00", "end_time": "09:45" }}] }}'
             ),
             "spark_idea": (
                 "You are a productivity expert specializing in actionable task breakdown. "
@@ -102,7 +110,7 @@ class LLMService:
                 "2. Each step MUST be 6 words or fewer.\n"
                 "3. Steps should be immediately executable (no vague concepts).\n"
                 "4. RETURN ONLY a JSON object with a 'tasks' field containing an array of strings.\n"
-                "Structure: {{ \"tasks\": [\"Action 1\", \"Action 2\", \"Action 3\"] }}"
+                'Structure: {{ "tasks": ["Action 1", "Action 2", "Action 3"] }}'
             ),
             "mindspace_vision": (
                 "Describe this image in short. Identify the mood, objects, aesthetic, and any visible text. "
@@ -116,13 +124,13 @@ class LLMService:
                 "2. Only suggest a NEW section if the input is completely unrelated to everything in the list.\n"
                 "3. Use broad categories (e.g., 'Nature' instead of 'Ocean', 'Self-Development' instead of 'Morning Routine').\n"
                 "4. Return ONLY a JSON object with a 'clusters' array of strings.\n"
-                "Structure: {{ \"clusters\": [\"Theme1\", \"Theme2\"] }}"
+                'Structure: {{ "clusters": ["Theme1", "Theme2"] }}'
             ),
             "mindspace_sentiment": (
                 "Analyze the emotional tone of the input. Return a single-word emotional tone. "
                 "Example: 'Nostalgic', 'Anxious', 'Determined', 'Calm'. "
                 "Return ONLY a JSON object with 'tone'. "
-                "Structure: {{ \"tone\": \"...\" }}"
+                'Structure: {{ "tone": "..." }}'
             ),
             "mindspace_patterns": (
                 "You are an expert psychological profiler and life coach. "
@@ -141,35 +149,41 @@ class LLMService:
                 "Be helpful, insightful, and always reference dates if they are in the context. "
                 "If the answer isn't in the context, say you don't recall that specific detail from their Mindspace. "
                 "Maintain a clean, encouraging tone."
-            )
+            ),
+            "copilot_ignite": (
+                "You are an 'Active Co-Pilot' for productivity. Your goal is to break the 'cold start' problem for a user. "
+                "Use the provided context (past notes) and the current task to write the FIRST concrete step or the FIRST paragraph to get them moving. "
+                "Do not just give advice; actually START the work. If it's a coding task, write the boilerplate. If it's writing, write the hook. "
+                "Return ONLY a JSON object with a 'draft' field. "
+                'Structure: {{ "draft": "..." }}'
+            ),
         }
 
         system_msg = system_prompts.get(prompt_type, "You are a helpful AI assistant. Output should be concise.")
-        
+
         if provider == "mock":
             if prompt_type == "negotiate_resistance":
                 return {
                     "deal_title": "The 5-Minute Compromise",
-                    "steps": ["Open the file.", "Write one word.", "Close it and celebrate."]
+                    "steps": ["Open the file.", "Write one word.", "Close it and celebrate."],
                 }
             return {"response": f"MOCK RESPONSE for {prompt_type or 'default'}"}
 
         llm = None
         if provider == "groq":
-            if not self.groq_key: raise ValueError("GROQ_API_KEY not set")
-            llm = ChatGroq(temperature=0, model_name=model or self.default_model, groq_api_key=self.groq_key)
+            if not self.groq_key:
+                raise ValueError("GROQ_API_KEY not set")
+            llm = ChatGroq(
+                temperature=0, model_name=model or self.default_model, groq_api_key=self.groq_key
+            )
         if not llm:
             raise ValueError(f"Provider {provider} not supported")
 
-        from langchain_core.prompts import ChatPromptTemplate
-        
         # Support for Vision
         if prompt_type == "mindspace_vision" and provider == "groq":
             vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"
             chat = ChatGroq(temperature=0, model_name=vision_model, groq_api_key=self.groq_key)
-            
-            # For vision, prompt is actually the image URL or base64
-            # Assuming 'prompt' is the image URL here
+
             message = HumanMessage(
                 content=[
                     {"type": "text", "text": system_msg},
@@ -183,29 +197,30 @@ class LLMService:
                 logger.error(f"Vision failed: {str(e)}")
                 return "An image that words couldn't capture."
 
-        chat_prompt = ChatPromptTemplate.from_messages([
-            ("system", system_msg),
-            ("human", "{input}")
-        ])
+        chat_prompt = ChatPromptTemplate.from_messages([("system", system_msg), ("human", "{input}")])
 
         try:
             logger.info("Invoking LLM...")
-            # Use raw ainvoke and pass variables directly to avoid KeyError on input text containing { }
             raw_response = await llm.ainvoke(chat_prompt.invoke({"input": prompt}))
             content = raw_response.content
 
             # Cleaning Step: Strip Markdown code blocks
-            import re
-            content = re.sub(r'```json\s*', '', content)
-            content = re.sub(r'```\s*', '', content)
+            content = re.sub(r"```json\s*", "", content)
+            content = re.sub(r"```\s*", "", content)
             content = content.strip()
 
-            import json
             # Prompt types that MUST return JSON
             JSON_REQUIRED_TYPES = {
-                "negotiate_resistance", "auto_tag_capture", "resurface_insight", 
-                "decompose_goal", "select_mission", "generate_schedule", 
-                "spark_idea", "mindspace_clustering", "mindspace_sentiment"
+                "negotiate_resistance",
+                "auto_tag_capture",
+                "resurface_insight",
+                "decompose_goal",
+                "select_mission",
+                "generate_schedule",
+                "spark_idea",
+                "mindspace_clustering",
+                "mindspace_sentiment",
+                "copilot_ignite",
             }
 
             try:
@@ -214,7 +229,7 @@ class LLMService:
                 return parsed
             except json.JSONDecodeError:
                 # Try to find a JSON block with regex
-                match = re.search(r'\{.*\}', content, re.DOTALL)
+                match = re.search(r"\{.*\}", content, re.DOTALL)
                 if match:
                     try:
                         parsed = json.loads(match.group())
@@ -222,12 +237,14 @@ class LLMService:
                         return parsed
                     except json.JSONDecodeError:
                         pass
-                
+
                 # If JSON is not strictly required, return the raw text
                 if prompt_type not in JSON_REQUIRED_TYPES:
-                    logger.info(f"JSON parsing failed but not required for {prompt_type}. Returning raw content.")
+                    logger.info(
+                        f"JSON parsing failed but not required for {prompt_type}. Returning raw content."
+                    )
                     return content
-                
+
                 raise ValueError(f"Could not find valid JSON in response for required type: {prompt_type}")
 
         except Exception as e:
@@ -235,56 +252,61 @@ class LLMService:
             # Fallback for enrichment failures
             if prompt_type == "auto_tag_capture":
                 logger.info("Returning fallback JSON for auto_tag_capture")
-                return { 
-                    "tags": ["Review"], 
-                    "type": "JOURNAL", 
-                    "sentiment": "NEUTRAL", 
-                    "confidence": 0.5 
-                }
+                return {"tags": ["Review"], "type": "JOURNAL", "sentiment": "NEUTRAL", "confidence": 0.5}
             raise e
 
-    async def generate_embedding(self, text: str):
+    async def generate_embedding(self, text: str) -> Optional[list]:
         """
         Generate vector embedding using HuggingFace API (all-MiniLM-L6-v2)
         """
-        if not self.hf_token:
+        if not hf_client:
             logger.error("HUGGINGFACE_API_KEY not set")
             return None
 
-        headers = {"Authorization": f"Bearer {self.hf_token}"}
-        
         try:
-            # Running synchronous requests in async flow (can be improved with aiohttp but sticking to requests as per user snippet)
-            # For production, consider run_in_executor
-            import asyncio
-            from functools import partial
-            
-            loop = asyncio.get_event_loop()
-            # response = await loop.run_in_executor(
-            #     None, 
-            #     partial(
-            #         requests.post, 
-            #         self.hf_api_url, 
-            #         headers=headers, 
-            #         json={"inputs": {"source_sentence": text, "sentences" : [text]}, "options":{"wait_for_model":True}}
-            #     )
-            # )
-
-            response = client.feature_extraction(
+            response = hf_client.feature_extraction(
                 text,
                 model="sentence-transformers/all-MiniLM-L6-v2",
-            )   
-
-            import numpy as np
+            )
             vector = np.array(response).flatten().tolist()
             return vector
-
-            if response.status_code != 200:
-                logger.error(f"HF Embedding Error: {response.text}")
-                return None
-                
-            return response.tolist()
-
         except Exception as e:
             logger.error(f"HF embedding generation failed: {str(e)}")
             return None
+
+
+# Helper functions for vector operations
+def safe_vec(v):
+    """Convert various vector formats to numpy array."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except json.JSONDecodeError:
+            # Handle postgres vector format "[1,2,3]" or "(1,2,3)"
+            v = v.strip("[]()").split(",")
+            v = [float(x) for x in v]
+    return np.array(v).flatten()
+
+
+def cosine_similarity(v1, v2) -> float:
+    """Calculate cosine similarity between two vectors."""
+    try:
+        vec1 = safe_vec(v1)
+        vec2 = safe_vec(v2)
+        if vec1.shape == vec2.shape and vec1.size > 0:
+            return 1 - cosine(vec1, vec2)
+    except Exception as e:
+        logger.error(f"Vector compare error: {e}")
+    return 0.0
+
+
+# Singleton instance
+_llm_service: LLMService = None
+
+
+def get_llm_service() -> LLMService:
+    """Returns a singleton LLMService instance."""
+    global _llm_service
+    if _llm_service is None:
+        _llm_service = LLMService()
+    return _llm_service
